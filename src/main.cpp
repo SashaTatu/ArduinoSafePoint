@@ -1,40 +1,33 @@
-#include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <Wire.h>
-#include <ArduinoJson.h>
-#include <HardwareSerial.h>
-
 #include "AHT10.h"
-#include "utils.h"
-#include "config.h"
+#include "config.h"      // твій WiFi та API конфіг
+#include "utils.h"       // функція generateIdentifier()
 #include "index_html.h"
 #include "result_html.h"
+#include <ArduinoJson.h>
 
 // ================== MQ-135 ==================
 #define MQ135_PIN 34
 #define ADC_MAX 4095.0
 #define VREF 3.3
-
 #define CO2_A 116.6020682
 #define CO2_B -2.769034857
-
-float R0 = 23.08;
+float R0 = 56.84;  // після калібрування у чистому повітрі
 
 // ================== GLOBALS ==================
 WebServer webServer(HTTP_PORT);
 DNSServer dnsServer;
 IPAddress apIP(192, 168, 4, 1);
-
 AHT10 aht;
 
 unsigned long lastAHTRead = 0;
 unsigned long lastCO2Read = 0;
 unsigned long lastDataSend = 0;
-
 const unsigned long DATA_SEND_INTERVAL = 10 * 60 * 1000UL;
 
 String deviceId = "";
@@ -63,15 +56,12 @@ void handleConnect() {
   String mac = WiFi.macAddress();
 
   WiFi.begin(ssid.c_str(), password.c_str());
-  Serial.print("Connecting to WiFi");
 
   int tries = 0;
   while (WiFi.status() != WL_CONNECTED && tries < 40) {
     delay(300);
-    Serial.print(".");
     tries++;
   }
-  Serial.println();
 
   if (WiFi.status() != WL_CONNECTED) {
     lastApiResult = "WiFi failed";
@@ -85,10 +75,8 @@ void handleConnect() {
 
   if (https.begin(client, REGISTRATION_API_URL)) {
     https.addHeader("Content-Type", "application/json");
-
     String payload = "{\"deviceId\":\"" + deviceId + "\",\"mac\":\"" + mac + "\"}";
     int code = https.POST(payload);
-
     lastApiResult = (code > 0) ? https.getString() : "HTTP error";
     https.end();
   }
@@ -112,7 +100,7 @@ float getCO2ppm() {
   return CO2_A * pow(ratio, CO2_B);
 }
 
-// ================== API SEND ==================
+// ================== API ==================
 void sendSensorData(float t, float h, float co2) {
   if (WiFi.status() != WL_CONNECTED || deviceId == "") return;
 
@@ -127,10 +115,10 @@ void sendSensorData(float t, float h, float co2) {
     StaticJsonDocument<256> doc;
     doc["temperature"] = round(t * 100) / 100.0;
     doc["humidity"] = round(h * 100) / 100.0;
+    doc["co2"] = round(co2);
 
     String payload;
     serializeJson(doc, payload);
-
     https.POST(payload);
     https.end();
   }
@@ -138,17 +126,11 @@ void sendSensorData(float t, float h, float co2) {
 
 // ================== SETUP ==================
 void setup() {
-  Serial.begin(115200);
-  delay(1000);
-  Serial.println("Booting...");
-
   // I2C
-  Wire.begin(16, 17);
-  if (!aht.begin()) {
-    Serial.println("AHT10 not detected!");
-  }
+  Wire.begin(13, 12);
+  aht.begin();  // якщо датчик не підключений, програма продовжить працювати
 
-  // MQ-135 ADC
+  // MQ-135
   analogReadResolution(12);
   analogSetPinAttenuation(MQ135_PIN, ADC_11db);
 
@@ -165,12 +147,9 @@ void setup() {
   webServer.onNotFound(handleNotFound);
 
   webServer.begin();
-  Serial.println("AP started: " + WiFi.softAPIP().toString());
 }
 
 // ================== LOOP ==================
-
-
 void loop() {
   dnsServer.processNextRequest();
   webServer.handleClient();
@@ -181,29 +160,21 @@ void loop() {
   static float lastHum = NAN;
   static float lastCO2 = NAN;
 
-  // AHT10
   if (now - lastAHTRead > 1000) {
     aht.measure(&lastTemp, &lastHum);
     lastAHTRead = now;
   }
 
-  // MQ-135
   if (now - lastCO2Read > 2000) {
     lastCO2 = getCO2ppm();
-    if (lastCO2 > 0) {
-      Serial.printf("CO2: %.0f ppm\n", lastCO2);
-    }
     lastCO2Read = now;
   }
 
-  // Send to API
   if (now - lastDataSend > DATA_SEND_INTERVAL &&
       !isnan(lastTemp) && !isnan(lastHum) && !isnan(lastCO2)) {
-
     sendSensorData(lastTemp, lastHum, lastCO2);
     lastDataSend = now;
   }
+
+  Serial.println("Temp: " + String(lastTemp) + " C, Hum: " + String(lastHum) + " %, CO2: " + String(lastCO2) + " ppm");
 }
-
-
-
