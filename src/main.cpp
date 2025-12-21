@@ -98,6 +98,7 @@ float getCO2ppm() {
 
   float ratio = Rs / R0;
   return CO2_A * pow(ratio, CO2_B);
+  
 }
 
 // ================== API ==================
