@@ -16,13 +16,14 @@
 
 // ================== MQ-135 CONFIG ==================
 #define Board                   ("ESP-32")
-#define Pin                     (34)
+#define Pin                     (34) 
 #define Type                    ("MQ-135")
 #define Voltage_Resolution      (3.3)
 #define ADC_Bit_Resolution      (12)
 #define RatioMQ135CleanAir      (3.6)
 
-#define MQ135_R0                56.75   // ❗ ЗАМІНИ НА СВІЙ R0
+// Встановіть ваше перевірене R0
+#define MQ135_R0                100.22   
 
 MQUnifiedsensor MQ135(Board, Voltage_Resolution, ADC_Bit_Resolution, Pin, Type);
 
@@ -41,6 +42,10 @@ const unsigned long DATA_SEND_INTERVAL = 10 * 60 * 1000UL;
 
 String deviceId = "";
 String lastApiResult = "";
+
+float currentTemp = 20.0;
+float currentHum = 50.0;
+float currentCO2 = 400.0;
 
 // ================== HTTP HANDLERS ==================
 void handleRoot() {
@@ -74,15 +79,10 @@ void handleConnect() {
   if (WiFi.status() == WL_CONNECTED) {
     WiFiClientSecure client;
     client.setCACert(root_ca);
-
     HTTPClient https;
     if (https.begin(client, REGISTRATION_API_URL)) {
       https.addHeader("Content-Type", "application/json");
-
-      String payload =
-        "{\"deviceId\":\"" + deviceId +
-        "\",\"mac\":\"" + WiFi.macAddress() + "\"}";
-
+      String payload = "{\"deviceId\":\"" + deviceId + "\",\"mac\":\"" + WiFi.macAddress() + "\"}";
       int code = https.POST(payload);
       lastApiResult = (code > 0) ? https.getString() : "HTTP error";
       https.end();
@@ -90,7 +90,6 @@ void handleConnect() {
   } else {
     lastApiResult = "WiFi failed";
   }
-
   webServer.send(200, "text/html", getResultPage(deviceId, lastApiResult));
 }
 
@@ -100,21 +99,20 @@ void sendSensorData(float t, float h, float co2) {
 
   WiFiClientSecure client;
   client.setCACert(root_ca);
-
   HTTPClient https;
-  String url = PARAM_API_URL + deviceId + "/parameterspost";
+  String url = String(PARAM_API_URL) + deviceId + "/parameterspost";
 
   if (https.begin(client, url)) {
     https.addHeader("Content-Type", "application/json");
-
     StaticJsonDocument<256> doc;
-    doc["temperature"] = round(t * 10) / 10.0;
-    doc["humidity"]    = round(h * 10) / 10.0;
-    doc["co2"]         = (int)round(co2);
+    
+    doc["temperature"] = isnan(t) ? 0 : round(t * 10) / 10.0;
+    doc["humidity"]    = isnan(h) ? 0 : round(h * 10) / 10.0;
+    // Обмежуємо знизу 400 ppm для логічності даних
+    doc["co2"]         = (co2 < 400) ? 400 : (int)round(co2);
 
     String payload;
     serializeJson(doc, payload);
-
     https.POST(payload);
     https.end();
   }
@@ -127,37 +125,31 @@ void setup() {
 
   Wire.begin(14, 27);
 
-  // ---- AHT10 / AHT20 ----
   if (!aht.begin()) {
     Serial.println("❌ AHT sensor not found");
   } else {
     Serial.println("✅ AHT sensor ready");
   }
 
-  // ---- MQ-135 ----
-  MQ135.setRegressionMethod(1);     // _PPM = a * ratio^b
-  MQ135.setA(110.47);
-  MQ135.setB(-2.862);
+  // Налаштування MQ-135 для CO2
+  MQ135.setRegressionMethod(1); 
+  MQ135.setA(110.47); MQ135.setB(-2.862); 
   MQ135.init();
   MQ135.setR0(MQ135_R0);
 
   Serial.println("🔥 MQ-135 initialized");
-  Serial.print("R0 = ");
-  Serial.println(MQ135_R0);
 
-  // ---- WiFi AP ----
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
   WiFi.softAP(AP_SSID, AP_PASSWORD);
   dnsServer.start(53, "*", apIP);
 
-  // ---- Web ----
   webServer.on("/", HTTP_GET, handleRoot);
   webServer.on("/connect", HTTP_POST, handleConnect);
   webServer.onNotFound(handleNotFound);
   webServer.begin();
 
-  Serial.println("🌐 Captive portal started");
+  Serial.println("🌐 System Ready");
 }
 
 // ================== LOOP ==================
@@ -167,35 +159,40 @@ void loop() {
 
   unsigned long now = millis();
 
-  static float temperature = NAN;
-  static float humidity = NAN;
-  static float co2 = NAN;
-
-  // ---- Read sensors ----
+  // ---- Читання сенсорів ----
   if (now - lastReadTime >= READ_INTERVAL) {
     sensors_event_t humEvent, tempEvent;
     aht.getEvent(&humEvent, &tempEvent);
 
-    temperature = tempEvent.temperature;
-    humidity = humEvent.relative_humidity;
+    currentTemp = tempEvent.temperature;
+    currentHum = humEvent.relative_humidity;
 
-    MQ135.update();
-    co2 = MQ135.readSensor();   // ⚠️ ОЦІНКА CO₂, не NDIR
+    // Оновлюємо MQ-135 з урахуванням температури (якщо бібліотека підтримує)
+    MQ135.update(); 
+    
+    // MQ-135 вимірює ПРИРІСТ над чистим повітрям.
+    // На вулиці (чисте повітря) він покаже ~0-50, тому додаємо 400.
+    float ppmRaw = MQ135.readSensor();
+    currentCO2 = ppmRaw + 400.0; 
 
-    Serial.printf(
-      "🌡 %.2f °C | 💧 %.2f %% | 🟢 CO2 ≈ %.0f ppm\n",
-      temperature, humidity, co2
-    );
+    Serial.printf("🌡 %.1f°C | 💧 %.1f%% | 🟢 CO2: %.0f ppm\n", 
+                  currentTemp, currentHum, currentCO2);
 
     lastReadTime = now;
   }
 
-  // ---- Send data ----
+  // ---- Відправка даних ----
   if (now - lastDataSend >= DATA_SEND_INTERVAL) {
-    if (!isnan(temperature) && !isnan(co2)) {
-      sendSensorData(temperature, humidity, co2);
+    if (!isnan(currentTemp) && WiFi.status() == WL_CONNECTED) {
+      sendSensorData(currentTemp, currentHum, currentCO2);
+      Serial.println("📤 Data sent to API");
       lastDataSend = now;
     }
+  }
+  
+  // Авто-перепідключення WiFi якщо була втрата зв'язку
+  if (WiFi.status() != WL_CONNECTED && !deviceId.isEmpty() && (now % 60000 < 20)) {
+     WiFi.reconnect();
   }
 
   delay(10);
