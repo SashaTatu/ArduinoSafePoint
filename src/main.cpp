@@ -1,39 +1,48 @@
+#include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <Wire.h>
-#include "AHT10.h"
-#include "config.h"      // твій WiFi та API конфіг
-#include "utils.h"       // функція generateIdentifier()
-#include "index_html.h"
-#include "result_html.h"
+#include <Adafruit_AHTX0.h>
+#include <MQUnifiedsensor.h>
 #include <ArduinoJson.h>
 
-// ================== MQ-135 ==================
-#define MQ135_PIN 34
-#define ADC_MAX 4095.0
-#define VREF 3.3
-#define CO2_A 116.6020682
-#define CO2_B -2.769034857
-float R0 = 56.84;  // після калібрування у чистому повітрі
+#include "config.h"
+#include "utils.h"
+#include "index_html.h"
+#include "result_html.h"
+
+// ================== MQ-135 CONFIG ==================
+#define Board                   ("ESP-32")
+#define Pin                     (34)
+#define Type                    ("MQ-135")
+#define Voltage_Resolution      (3.3)
+#define ADC_Bit_Resolution      (12)
+#define RatioMQ135CleanAir      (3.6)
+
+#define MQ135_R0                56.75   // ❗ ЗАМІНИ НА СВІЙ R0
+
+MQUnifiedsensor MQ135(Board, Voltage_Resolution, ADC_Bit_Resolution, Pin, Type);
 
 // ================== GLOBALS ==================
-WebServer webServer(HTTP_PORT);
+WebServer webServer(80);
 DNSServer dnsServer;
 IPAddress apIP(192, 168, 4, 1);
-AHT10 aht;
 
-unsigned long lastAHTRead = 0;
-unsigned long lastCO2Read = 0;
+Adafruit_AHTX0 aht;
+
+unsigned long lastReadTime = 0;
 unsigned long lastDataSend = 0;
+
+const unsigned long READ_INTERVAL = 5000;
 const unsigned long DATA_SEND_INTERVAL = 10 * 60 * 1000UL;
 
 String deviceId = "";
 String lastApiResult = "";
 
-// ================== HTTP ==================
+// ================== HTTP HANDLERS ==================
 void handleRoot() {
   webServer.send_P(200, "text/html", index_html);
 }
@@ -45,81 +54,67 @@ void handleNotFound() {
 
 void handleConnect() {
   if (!webServer.hasArg("ssid") || !webServer.hasArg("password")) {
-    webServer.send(400, "text/plain", "Missing SSID or password");
+    webServer.send(400, "text/plain", "Missing SSID");
     return;
   }
 
   String ssid = webServer.arg("ssid");
   String password = webServer.arg("password");
-
   deviceId = generateIdentifier();
-  String mac = WiFi.macAddress();
 
   WiFi.begin(ssid.c_str(), password.c_str());
 
   int tries = 0;
   while (WiFi.status() != WL_CONNECTED && tries < 40) {
-    delay(300);
+    delay(250);
+    yield();
     tries++;
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client;
+    client.setCACert(root_ca);
+
+    HTTPClient https;
+    if (https.begin(client, REGISTRATION_API_URL)) {
+      https.addHeader("Content-Type", "application/json");
+
+      String payload =
+        "{\"deviceId\":\"" + deviceId +
+        "\",\"mac\":\"" + WiFi.macAddress() + "\"}";
+
+      int code = https.POST(payload);
+      lastApiResult = (code > 0) ? https.getString() : "HTTP error";
+      https.end();
+    }
+  } else {
     lastApiResult = "WiFi failed";
-    webServer.send(200, "text/html", getResultPage(deviceId, lastApiResult));
-    return;
-  }
-
-  WiFiClientSecure client;
-  client.setCACert(root_ca);
-  HTTPClient https;
-
-  if (https.begin(client, REGISTRATION_API_URL)) {
-    https.addHeader("Content-Type", "application/json");
-    String payload = "{\"deviceId\":\"" + deviceId + "\",\"mac\":\"" + mac + "\"}";
-    int code = https.POST(payload);
-    lastApiResult = (code > 0) ? https.getString() : "HTTP error";
-    https.end();
   }
 
   webServer.send(200, "text/html", getResultPage(deviceId, lastApiResult));
 }
 
-// ================== MQ-135 ==================
-float getResistance(int adc) {
-  float voltage = adc * (VREF / ADC_MAX);
-  if (voltage <= 0.01) return -1;
-  return (VREF - voltage) / voltage;
-}
-
-float getCO2ppm() {
-  int adc = analogRead(MQ135_PIN);
-  float Rs = getResistance(adc);
-  if (Rs < 0) return -1;
-
-  float ratio = Rs / R0;
-  return CO2_A * pow(ratio, CO2_B);
-  
-}
-
-// ================== API ==================
+// ================== SEND SENSOR DATA ==================
 void sendSensorData(float t, float h, float co2) {
-  if (WiFi.status() != WL_CONNECTED || deviceId == "") return;
+  if (WiFi.status() != WL_CONNECTED || deviceId.isEmpty()) return;
 
   WiFiClientSecure client;
   client.setCACert(root_ca);
-  HTTPClient https;
 
+  HTTPClient https;
   String url = PARAM_API_URL + deviceId + "/parameterspost";
+
   if (https.begin(client, url)) {
     https.addHeader("Content-Type", "application/json");
 
     StaticJsonDocument<256> doc;
-    doc["temperature"] = round(t * 100) / 100.0;
-    doc["humidity"] = round(h * 100) / 100.0;
-    doc["co2"] = round(co2);
+    doc["temperature"] = round(t * 10) / 10.0;
+    doc["humidity"]    = round(h * 10) / 10.0;
+    doc["co2"]         = (int)round(co2);
 
     String payload;
     serializeJson(doc, payload);
+
     https.POST(payload);
     https.end();
   }
@@ -127,27 +122,42 @@ void sendSensorData(float t, float h, float co2) {
 
 // ================== SETUP ==================
 void setup() {
-  // I2C
-  Wire.begin(13, 12);
-  aht.begin();  // якщо датчик не підключений, програма продовжить працювати
+  Serial.begin(115200);
+  delay(500);
 
-  // MQ-135
-  analogReadResolution(12);
-  analogSetPinAttenuation(MQ135_PIN, ADC_11db);
+  Wire.begin(14, 27);
 
-  // WiFi AP
+  // ---- AHT10 / AHT20 ----
+  if (!aht.begin()) {
+    Serial.println("❌ AHT sensor not found");
+  } else {
+    Serial.println("✅ AHT sensor ready");
+  }
+
+  // ---- MQ-135 ----
+  MQ135.setRegressionMethod(1);     // _PPM = a * ratio^b
+  MQ135.setA(110.47);
+  MQ135.setB(-2.862);
+  MQ135.init();
+  MQ135.setR0(MQ135_R0);
+
+  Serial.println("🔥 MQ-135 initialized");
+  Serial.print("R0 = ");
+  Serial.println(MQ135_R0);
+
+  // ---- WiFi AP ----
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
   WiFi.softAP(AP_SSID, AP_PASSWORD);
+  dnsServer.start(53, "*", apIP);
 
-  dnsServer.start(DNS_PORT, "*", apIP);
-
-  // Web
+  // ---- Web ----
   webServer.on("/", HTTP_GET, handleRoot);
   webServer.on("/connect", HTTP_POST, handleConnect);
   webServer.onNotFound(handleNotFound);
-
   webServer.begin();
+
+  Serial.println("🌐 Captive portal started");
 }
 
 // ================== LOOP ==================
@@ -157,25 +167,36 @@ void loop() {
 
   unsigned long now = millis();
 
-  static float lastTemp = NAN;
-  static float lastHum = NAN;
-  static float lastCO2 = NAN;
+  static float temperature = NAN;
+  static float humidity = NAN;
+  static float co2 = NAN;
 
-  if (now - lastAHTRead > 1000) {
-    aht.measure(&lastTemp, &lastHum);
-    lastAHTRead = now;
+  // ---- Read sensors ----
+  if (now - lastReadTime >= READ_INTERVAL) {
+    sensors_event_t humEvent, tempEvent;
+    aht.getEvent(&humEvent, &tempEvent);
+
+    temperature = tempEvent.temperature;
+    humidity = humEvent.relative_humidity;
+
+    MQ135.update();
+    co2 = MQ135.readSensor();   // ⚠️ ОЦІНКА CO₂, не NDIR
+
+    Serial.printf(
+      "🌡 %.2f °C | 💧 %.2f %% | 🟢 CO2 ≈ %.0f ppm\n",
+      temperature, humidity, co2
+    );
+
+    lastReadTime = now;
   }
 
-  if (now - lastCO2Read > 2000) {
-    lastCO2 = getCO2ppm();
-    lastCO2Read = now;
+  // ---- Send data ----
+  if (now - lastDataSend >= DATA_SEND_INTERVAL) {
+    if (!isnan(temperature) && !isnan(co2)) {
+      sendSensorData(temperature, humidity, co2);
+      lastDataSend = now;
+    }
   }
 
-  if (now - lastDataSend > DATA_SEND_INTERVAL &&
-      !isnan(lastTemp) && !isnan(lastHum) && !isnan(lastCO2)) {
-    sendSensorData(lastTemp, lastHum, lastCO2);
-    lastDataSend = now;
-  }
-
-  Serial.println("Temp: " + String(lastTemp) + " C, Hum: " + String(lastHum) + " %, CO2: " + String(lastCO2) + " ppm");
+  delay(10);
 }
