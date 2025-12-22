@@ -26,8 +26,8 @@
 #define MQ135_R0                100.22
 
 
-
-#define RELAY_PIN 17
+#define RELAY_PIN 25
+#define REQUEST_DELAY 5000
 
 MQUnifiedsensor MQ135(Board, Voltage_Resolution, ADC_Bit_Resolution, Pin, Type);
 
@@ -43,6 +43,7 @@ unsigned long lastDataSend = 0;
 
 const unsigned long READ_INTERVAL = 5000;
 const unsigned long DATA_SEND_INTERVAL = 10 * 60 * 1000UL;
+unsigned long lastAlertCheck = 0;
 
 String deviceId = "";
 String lastApiResult = "";
@@ -204,12 +205,53 @@ void sendSensorData(float t, float h, float co2) {
   https.end();
 }
 
+
+bool GetAlert(){
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  String url = "https://safepoint-bei0.onrender.com/api/device/" + deviceId + "/doorstatus";
+
+  http.begin(client, url);
+  int code = http.GET();
+
+  if (code <= 0) {
+    http.end();
+    return false;
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  StaticJsonDocument<256> doc;
+  if (deserializeJson(doc, payload)) return false;
+
+  return doc["status"];   // ← ОДИН return
+}
+
+
+void SetRelay(bool alert){
+  if (alert) {
+    digitalWrite(RELAY_PIN, HIGH);   
+    Serial.println("🚨 ALERT → Relay Off");
+  } else {
+    digitalWrite(RELAY_PIN, LOW);  
+    Serial.println("✅ NO ALERT → Relay On");
+  }
+}
+
 // ================== SETUP ==================
 void setup() {
   Serial.begin(115200);
   delay(500);
 
   Serial.println("\n🚀 ESP32 Booting...");
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);
+  Serial.println("🔌 Relay initialized");
 
   Wire.begin(14, 27);
 
@@ -220,11 +262,11 @@ void setup() {
   }
 
   // MQ-135
-MQ135.setRegressionMethod(1);
-MQ135.setA(110.47);
-MQ135.setB(-2.862);
-MQ135.init();
-MQ135.setR0(MQ135_R0);
+    MQ135.setRegressionMethod(1);
+    MQ135.setA(110.47);
+    MQ135.setB(-2.862);
+    MQ135.init();
+    MQ135.setR0(MQ135_R0);
 
   Serial.println("🔥 MQ-135 initialized");
 
@@ -240,6 +282,7 @@ MQ135.setR0(MQ135_R0);
   webServer.begin();
 
   Serial.println("🌐 Captive portal ready");
+  
 }
 
 // ================== LOOP ==================
@@ -273,6 +316,12 @@ void loop() {
   if (now - lastDataSend >= DATA_SEND_INTERVAL) {
     sendSensorData(currentTemp, currentHum, currentCO2);
     lastDataSend = now;
+  }
+  if (now - lastAlertCheck >= 5000 && !deviceId.isEmpty()) {
+    bool alert = GetAlert();
+    Serial.println(alert ? "ALERT = TRUE" : "ALERT = FALSE");
+    SetRelay(alert);
+    lastAlertCheck = now;
   }
 
   // ---- AUTO WIFI RECONNECT ----
