@@ -26,7 +26,7 @@
 #define MQ135_R0                100.22
 
 
-#define RELAY_PIN 25
+#define RELAY_PIN 26
 #define REQUEST_DELAY 5000
 
 MQUnifiedsensor MQ135(Board, Voltage_Resolution, ADC_Bit_Resolution, Pin, Type);
@@ -42,7 +42,7 @@ unsigned long lastReadTime = 0;
 unsigned long lastDataSend = 0;
 
 const unsigned long READ_INTERVAL = 5000;
-const unsigned long DATA_SEND_INTERVAL = 10 * 60 * 1000UL;
+const unsigned long DATA_SEND_INTERVAL =  2 * 60 * 1000UL;
 unsigned long lastAlertCheck = 0;
 
 String deviceId = "";
@@ -253,7 +253,9 @@ void setup() {
   digitalWrite(RELAY_PIN, HIGH);
   Serial.println("🔌 Relay initialized");
 
-  Wire.begin(14, 27);
+  delay(2000);
+
+  Wire.begin(14, 16);
 
   if (!aht.begin()) {
     Serial.println("❌ AHT sensor not found");
@@ -269,6 +271,7 @@ void setup() {
     MQ135.setR0(MQ135_R0);
 
   Serial.println("🔥 MQ-135 initialized");
+  delay(2000);
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
@@ -322,6 +325,7 @@ void loop() {
     Serial.println(alert ? "ALERT = TRUE" : "ALERT = FALSE");
     SetRelay(alert);
     lastAlertCheck = now;
+
   }
 
   // ---- AUTO WIFI RECONNECT ----
