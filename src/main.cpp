@@ -8,6 +8,7 @@
 #include <Adafruit_AHTX0.h>
 #include <MQUnifiedsensor.h>
 #include <ArduinoJson.h>
+#include <LiquidCrystal_I2C.h>
 
 #include "config.h"
 #include "utils.h"
@@ -31,6 +32,9 @@
 
 MQUnifiedsensor MQ135(Board, Voltage_Resolution, ADC_Bit_Resolution, Pin, Type);
 
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
 // ================== GLOBALS ==================
 WebServer webServer(80);
 DNSServer dnsServer;
@@ -51,6 +55,11 @@ String lastApiResult = "";
 float currentTemp = NAN;
 float currentHum  = NAN;
 float currentCO2  = NAN;
+
+
+byte tempIcon[8] = {B00100, B01010, B01010, B01110, B01110, B11111, B11111, B00100};
+byte humIcon[8]  = {B00100, B00100, B01010, B01010, B10001, B10001, B10001, B01110};
+byte co2Icon[8]  = {B00000, B01110, B10001, B11111, B11011, B10001, B01110, B00000};
 
 
 // ================== HTTP HANDLERS ==================
@@ -232,16 +241,77 @@ bool GetAlert(){
   return doc["status"];   // ← ОДИН return
 }
 
-
-void SetRelay(bool alert){
-  if (alert) {
-    digitalWrite(RELAY_PIN, HIGH);   
-    Serial.println("🚨 ALERT → Relay Off");
-  } else {
-    digitalWrite(RELAY_PIN, LOW);  
-    Serial.println("✅ NO ALERT → Relay On");
-  }
+void lcdOn() {
+    lcd.backlight();   // увімкнути підсвітку
+    lcd.display();     // увімкнути LCD
 }
+
+void lcdOff() {
+    lcd.noBacklight(); // вимкнути підсвітку
+    lcd.noDisplay();   // вимкнути LCD
+}
+
+
+void updateOLED() {
+    // Перевіряємо стан реле
+    if (digitalRead(RELAY_PIN) == HIGH) {
+        lcd.noBacklight(); // Вимикаємо підсвітку
+        lcd.clear();       // Очищуємо екран, щоб нічого не було видно
+        return;            // Виходимо з функції, не малюючи дані
+    }
+
+    // Якщо ми тут, значить реле LOW -> вмикаємо підсвітку і малюємо
+    lcd.backlight();
+
+    // --- Рядок 1: Термометр + Вологість ---
+    lcd.setCursor(0, 0);
+    lcd.write(0); // Іконка градусника
+    if (isnan(currentTemp)) {
+        lcd.print(" --.-C ");
+    } else {
+        lcd.printf("%5.1fC ", currentTemp);
+    }
+
+    lcd.setCursor(9, 0);
+    lcd.write(1); // Іконка краплі
+    if (isnan(currentHum)) {
+        lcd.print(" --% ");
+    } else {
+        lcd.printf("%3.0f%% ", currentHum);
+    }
+
+    // --- Рядок 2: CO2 ---
+    lcd.setCursor(0, 1);
+    lcd.write(2); // Іконка CO2
+    lcd.print(" CO2:");
+    
+    int co2Val = (int)currentCO2;
+    if (co2Val < 1000) lcd.print(" "); 
+    lcd.print(co2Val);
+    lcd.print("ppm");
+}
+
+
+
+void SetRelay(bool alert) {
+    if (alert || WiFi.status() != WL_CONNECTED) {
+        // 🚨 ТРИВОГА
+        digitalWrite(RELAY_PIN, HIGH);
+        Serial.println("🚨 ALERT → Relay Off (HIGH)");
+
+        lcdOn();        
+        updateOLED();    
+    } else {
+        // ✅ НЕМАЄ ТРИВОГИ
+        digitalWrite(RELAY_PIN, LOW);
+        Serial.println("✅ NO ALERT → Relay On (LOW)");
+
+        lcdOff();       // ⬅️ ВИМКНУТИ дисплей
+    }
+}
+
+
+
 
 // ================== SETUP ==================
 void setup() {
@@ -256,8 +326,20 @@ void setup() {
   delay(2000);
 
   Wire.begin(14, 16);
+  Wire1.begin(17, 25);
 
-  if (!aht.begin()) {
+
+
+  lcd.init(); 
+  lcd.backlight(); 
+  lcd.setCursor(0, 0);
+  lcd.print("SafePoint Ready");
+
+  lcd.createChar(0, tempIcon);
+  lcd.createChar(1, humIcon);
+  lcd.createChar(2, co2Icon);
+
+  if (!aht.begin(&Wire1)) {
     Serial.println("❌ AHT sensor not found");
   } else {
     Serial.println("✅ AHT sensor ready");
@@ -311,7 +393,7 @@ void loop() {
       "🌡 %.1f°C | 💧 %.1f%% | 🟢 CO2: %.0f ppm\n",
       currentTemp, currentHum, currentCO2
     );
-
+    updateOLED();
     lastReadTime = now;
   }
 
