@@ -46,7 +46,7 @@ unsigned long lastReadTime = 0;
 unsigned long lastDataSend = 0;
 
 const unsigned long READ_INTERVAL = 5000;
-const unsigned long DATA_SEND_INTERVAL =  2 * 60 * 1000UL;
+const unsigned long DATA_SEND_INTERVAL =  60 * 1000UL;
 unsigned long lastAlertCheck = 0;
 
 String deviceId = "";
@@ -238,23 +238,15 @@ bool GetAlert(){
   StaticJsonDocument<256> doc;
   if (deserializeJson(doc, payload)) return false;
 
-  return doc["status"];   // ← ОДИН return
+  return doc["status"];   
 }
 
-void lcdOn() {
-    lcd.backlight();   // увімкнути підсвітку
-    lcd.display();     // увімкнути LCD
-}
 
-void lcdOff() {
-    lcd.noBacklight(); // вимкнути підсвітку
-    lcd.noDisplay();   // вимкнути LCD
-}
 
 
 void updateOLED() {
     // Перевіряємо стан реле
-    if (digitalRead(RELAY_PIN) == HIGH) {
+    if (digitalRead(RELAY_PIN) == LOW) {
         lcd.noBacklight(); // Вимикаємо підсвітку
         lcd.clear();       // Очищуємо екран, щоб нічого не було видно
         return;            // Виходимо з функції, не малюючи дані
@@ -297,16 +289,12 @@ void SetRelay(bool alert) {
     if (alert || WiFi.status() != WL_CONNECTED) {
         // 🚨 ТРИВОГА
         digitalWrite(RELAY_PIN, HIGH);
-        Serial.println("🚨 ALERT → Relay Off (HIGH)");
-
-        lcdOn();        
+        Serial.println("🚨 ALERT → Relay Off (HIGH)");      
         updateOLED();    
     } else {
         // ✅ НЕМАЄ ТРИВОГИ
         digitalWrite(RELAY_PIN, LOW);
-        Serial.println("✅ NO ALERT → Relay On (LOW)");
-
-        lcdOff();       // ⬅️ ВИМКНУТИ дисплей
+        Serial.println("✅ NO ALERT → Relay On (LOW)");    // ⬅️ ВИМКНУТИ дисплей
     }
 }
 
