@@ -178,8 +178,7 @@ void handleConnect() {
   if (https.begin(client, REGISTRATION_API_URL)) {
     https.addHeader("Content-Type", "application/json");
     String payload =
-      "{\"deviceId\":\"" + deviceId +
-      "\",\"mac\":\"" + WiFi.macAddress() + "\"}";
+      "{\"deviceId\":\"" + deviceId + "\"}";
     int code = https.POST(payload);
     Serial.print("📡 Registration HTTP: ");
     Serial.println(code);
