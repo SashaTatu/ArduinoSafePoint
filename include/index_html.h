@@ -71,10 +71,10 @@ p {
 <h2>Підключення до Wi-Fi</h2>
 <form action="/connect" method="post">
   <input type="text" name="ssid" placeholder="Назва мережі (SSID)" required>
-  <input type="password" name="password" placeholder="Пароль Wi-Fi" required>
+  <input type="password" name="password" placeholder="Пароль Wi-Fi">
   <button type="submit">Підключити</button>
 </form>
-<p>Введіть дані вашої Wi-Fi мережі, на які буде працювати пристрій</p>
+<p>Введіть дані вашої Wi-Fi мережі, на якій буде працювати пристрій</p>
 </div>
 </body>
 </html>
