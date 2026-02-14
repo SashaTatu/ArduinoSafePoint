@@ -268,82 +268,131 @@ bool GetAlert() {
   return doc["status"];
 }
 
-void SetRelay(bool status) {
-  digitalWrite(RELAY_PIN, status ? HIGH : LOW);
-  Serial.println(status ? "🚨 RELAY ON" : "✅ RELAY OFF");
-}
 
 // ================== LCD ==================
-void updateLCD() {
-  if (digitalRead(RELAY_PIN) == HIGH) {
-    lcd.noBacklight();
-    lcd.clear();
-    Serial.println("📟 LCD OFF (alert)");
-    return;
-  }
+void updateOLED() {
+    // Перевіряємо стан реле
+    if (digitalRead(RELAY_PIN) == LOW) {
+        lcd.noBacklight(); // Вимикаємо підсвітку
+        lcd.clear();       // Очищуємо екран, щоб нічого не було видно
+        return;            // Виходимо з функції, не малюючи дані
+    }
 
-  lcd.backlight();
-  lcd.setCursor(0,0);
-  lcd.write(0); lcd.printf("%4.1fC ", currentTemp);
-  lcd.write(1); lcd.printf("%2.0f%%", currentHum);
+    // Якщо ми тут, значить реле LOW -> вмикаємо підсвітку і малюємо
+    lcd.backlight();
 
-  lcd.setCursor(0,1);
-  lcd.write(2);
-  lcd.printf(" CO2:%dppm", (int)currentCO2);
+    // --- Рядок 1: Термометр + Вологість ---
+    lcd.setCursor(0, 0);
+    lcd.write(0); // Іконка градусника
+    if (isnan(currentTemp)) {
+        lcd.print(" --.-C ");
+    } else {
+        lcd.printf("%5.1fC ", currentTemp);
+    }
+
+    lcd.setCursor(9, 0);
+    lcd.write(1); // Іконка краплі
+    if (isnan(currentHum)) {
+        lcd.print(" --% ");
+    } else {
+        lcd.printf("%3.0f%% ", currentHum);
+    }
+
+    // --- Рядок 2: CO2 ---
+    lcd.setCursor(0, 1);
+    lcd.write(2); // Іконка CO2
+    lcd.print(" CO2:");
+    
+    int co2Val = (int)currentCO2;
+    if (co2Val < 1000) lcd.print(" "); 
+    lcd.print(co2Val);
+    lcd.print("ppm");
 }
 
 
 
 // ================== SETUP ==================
+// ================== ALERT / RELAY ==================
+void SetRelay(bool status) {
+  // Перевіряємо, чи змінився стан, щоб не спамити в консоль
+  if (relayState != status) {
+    relayState = status;
+    digitalWrite(RELAY_PIN, status ? HIGH : LOW);
+    
+    if (status) {
+      Serial.println("🚨 ALERT ACTIVE - Relay ON");
+    } else {
+      Serial.println("✅ SYSTEM NORMAL - Relay OFF");
+    }
+    
+    // Оновлюємо дисплей негайно при зміні статусу
+    updateOLED();
+  }
+}
+
+// ================== SETUP ==================
 void setup() {
   Serial.begin(115200);
-  delay(300);
+  delay(500);
   Serial.println("\n🚀 ESP32 BOOT");
 
+  // 1. Налаштування реле (спочатку в безпечний стан)
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH);
+  digitalWrite(RELAY_PIN, LOW); // Вимикаємо реле при старті
 
-  Wire.begin(14, 16);
-  Wire1.begin(17, 25);
+  // 2. Ініціалізація I2C шин
+  // Для LCD (Шина 0)
+  bool wireOk = Wire.begin(14, 16); 
+  // Для AHT (Шина 1)
+  bool wire1Ok = Wire1.begin(17, 25);
 
+  if (!wireOk) Serial.println("❌ I2C Wire (LCD) failed");
+  if (!wire1Ok) Serial.println("❌ I2C Wire1 (AHT) failed");
+
+  // 3. Ініціалізація LCD
   lcd.init();
   lcd.backlight();
-  lcd.createChar(0,tempIcon);
-  lcd.createChar(1,humIcon);
-  lcd.createChar(2,co2Icon);
-  lcd.print("SafePoint");
+  lcd.createChar(0, tempIcon);
+  lcd.createChar(1, humIcon);
+  lcd.createChar(2, co2Icon);
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("SafePoint OS");
+  lcd.setCursor(0, 1);
+  lcd.print("Initializing...");
 
-  aht.begin(&Wire1);
-
+  // 4. Ініціалізація сенсорів
+  if (!aht.begin(&Wire1)) {
+    Serial.println("❌ Could not find AHT10/20");
+  }
 
   MQ135.setRegressionMethod(1); 
   MQ135.setA(110.47); MQ135.setB(-2.862); 
   MQ135.init();
   MQ135.setR0(MQ135_R0);
+  
+  Serial.println("🔥 MQ-135 & Sensors ready");
 
-  Serial.println("🔥 MQ-135 initialized");
-
+  // 5. Робота з мережею
   String ssid, pass, devId;
   bool hasData = loadCredentials(devId, ssid, pass);
 
   WiFi.mode(WIFI_AP_STA);
 
   if (!hasData) {
-    Serial.println("🆕 First boot → AP only");
+    Serial.println("🆕 First boot → AP Mode");
     startAP();
   } else {
     deviceId = devId;
-    Serial.println("🔁 Saved creds → STA + AP");
-    startAP();
+    Serial.println("🔁 Connecting to saved WiFi...");
     WiFi.begin(ssid.c_str(), pass.c_str());
+    startAP(); // Залишаємо AP активним для налаштування, якщо WiFi не підключиться
   }
 
+  // Налаштування Web-сервера
   webServer.on("/", HTTP_GET, handleRoot);
   webServer.on("/connect", HTTP_POST, handleConnect);
-  webServer.on("/generate_204", HTTP_ANY, handleRoot);
-  webServer.on("/favicon.ico", HTTP_ANY, handleRoot);
-  webServer.on("/hotspot-detect.html", HTTP_ANY, handleRoot);
-  webServer.on("/ncsi.txt", HTTP_ANY, handleRoot);
   webServer.onNotFound(handleNotFound);
 
   webServer.begin();
@@ -379,7 +428,7 @@ void loop() {
     Serial.printf("📊 [SENSORS] Raw ADC: %d | Temp: %.1fC | Hum: %.0f%% | CO2: %.0f ppm\n",
       rawADC, currentTemp, currentHum, currentCO2);
 
-    updateLCD();
+    updateOLED();
     lastReadTime = now;
   }
 
