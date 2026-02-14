@@ -27,7 +27,7 @@
 #define Voltage_Resolution 3.3
 #define ADC_Bit_Resolution 12
 #define RatioMQ135CleanAir 3.6
-#define MQ135_R0 100.22
+#define MQ135_R0 22.5
 
 #define READ_INTERVAL 5000
 #define DATA_SEND_INTERVAL 60000UL
@@ -42,6 +42,7 @@ MQUnifiedsensor MQ135(Board, Voltage_Resolution, ADC_Bit_Resolution, Pin, Type);
 
 IPAddress apIP(192, 168, 4, 1);
 
+
 // ================== GLOBALS ==================
 String deviceId = "";
 bool apRunning = false;
@@ -55,6 +56,8 @@ unsigned long lastReadTime = 0;
 unsigned long lastDataSend = 0;
 unsigned long lastAlertCheck = 0;
 unsigned long lastWiFiLog = 0;
+
+bool relayState = false;
 
 // ================== LCD ICONS ==================
 byte tempIcon[8] = {B00100,B01010,B01010,B01110,B01110,B11111,B11111,B00100};
@@ -105,11 +108,15 @@ void startAP() {
 
 void stopAP() {
   if (!apRunning) return;
-
-  Serial.println("🛑 Stopping Access Point");
-  dnsServer.stop();
+  Serial.println("🛑 [SYSTEM] Stopping Access Point safely...");
+  
+  dnsServer.stop(); 
+  webServer.stop(); // Додайте зупинку веб-сервера перед вимкненням WiFi
+  delay(200);       // Дайте трохи більше часу на очищення буферів
+  
   WiFi.softAPdisconnect(true);
   apRunning = false;
+  Serial.println("✅ [SYSTEM] AP stopped");
 }
 
 // ================== WEB ==================
@@ -193,33 +200,41 @@ void handleConnect() {
 
 // ================== SEND DATA ==================
 void sendSensorData(float t, float h, float co2) {
-  if (WiFi.status() != WL_CONNECTED || deviceId.isEmpty()) return;
+  if (WiFi.status() != WL_CONNECTED || deviceId.isEmpty()) {
+    Serial.println("⚠️ Skip sending: No WiFi or No deviceId");
+    return;
+  }
 
-  Serial.println("📤 Sending sensor data");
-
+  Serial.println("📤 [HTTP] Sending sensor data...");
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient https;
 
   String url = String(PARAM_API_URL) + deviceId + "/parameterspost";
   if (!https.begin(client, url)) {
-    Serial.println("❌ HTTPS begin failed");
+    Serial.println("❌ [HTTP] Unable to connect to server");
     return;
   }
 
   https.addHeader("Content-Type", "application/json");
-
   StaticJsonDocument<256> doc;
-  doc["temperature"] = isnan(t) ? 0 : t;
-  doc["humidity"]    = isnan(h) ? 0 : h;
+  doc["temperature"] = isnan(t) ? 0 : round(t * 100.0) / 100.0;
+  doc["humidity"]    = isnan(h) ? 0 : round(h * 100.0) / 100.0;
   doc["co2"]         = (int)co2;
 
   String payload;
   serializeJson(doc, payload);
+  Serial.println("📦 [HTTP] Payload: " + payload);
 
   int code = https.POST(payload);
-  Serial.print("📡 Data HTTP: ");
-  Serial.println(code);
+  Serial.printf("📡 [HTTP] Response Code: %d\n", code);
+  
+  if (code > 0) {
+    String response = https.getString();
+    Serial.println("📄 [HTTP] Server Response: " + response);
+  } else {
+    Serial.printf("❌ [HTTP] Error: %s\n", https.errorToString(code).c_str());
+  }
   https.end();
 }
 
@@ -253,10 +268,9 @@ bool GetAlert() {
   return doc["status"];
 }
 
-// ================== RELAY ==================
-void SetRelay(bool alert) {
-  digitalWrite(RELAY_PIN, alert ? HIGH : LOW);
-  Serial.println(alert ? "🚨 RELAY ON" : "✅ RELAY OFF");
+void SetRelay(bool status) {
+  digitalWrite(RELAY_PIN, status ? HIGH : LOW);
+  Serial.println(status ? "🚨 RELAY ON" : "✅ RELAY OFF");
 }
 
 // ================== LCD ==================
@@ -278,6 +292,8 @@ void updateLCD() {
   lcd.printf(" CO2:%dppm", (int)currentCO2);
 }
 
+
+
 // ================== SETUP ==================
 void setup() {
   Serial.begin(115200);
@@ -287,8 +303,8 @@ void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH);
 
-  Wire.begin(14,16);
-  Wire1.begin(17,25);
+  Wire.begin(14, 16);
+  Wire1.begin(17, 25);
 
   lcd.init();
   lcd.backlight();
@@ -299,8 +315,13 @@ void setup() {
 
   aht.begin(&Wire1);
 
+
+  MQ135.setRegressionMethod(1); 
+  MQ135.setA(110.47); MQ135.setB(-2.862); 
   MQ135.init();
   MQ135.setR0(MQ135_R0);
+
+  Serial.println("🔥 MQ-135 initialized");
 
   String ssid, pass, devId;
   bool hasData = loadCredentials(devId, ssid, pass);
@@ -334,7 +355,14 @@ void loop() {
   webServer.handleClient();
   dnsServer.processNextRequest();
 
+  yield(); 
+
   unsigned long now = millis();
+  
+  // Перевірка на адекватність даних CO2
+  if (currentCO2 > 1000000 || currentCO2 < 0) {
+      currentCO2 = 400; // Тимчасове значення "свіжого повітря", якщо датчик "божеволіє"
+  }
 
   if (now - lastReadTime > READ_INTERVAL) {
     sensors_event_t h, t;
@@ -343,11 +371,13 @@ void loop() {
     currentTemp = t.temperature;
     currentHum  = h.relative_humidity;
 
+    // Логування сирих даних для діагностики
+    int rawADC = analogRead(34); 
     MQ135.update();
-    currentCO2 = MQ135.readSensor() + 400;
+    currentCO2 = MQ135.readSensor();
 
-    Serial.printf("🌡 %.1fC 💧 %.0f%% CO2 %dppm\n",
-      currentTemp, currentHum, (int)currentCO2);
+    Serial.printf("📊 [SENSORS] Raw ADC: %d | Temp: %.1fC | Hum: %.0f%% | CO2: %.0f ppm\n",
+      rawADC, currentTemp, currentHum, currentCO2);
 
     updateLCD();
     lastReadTime = now;
