@@ -27,7 +27,7 @@
 #define Voltage_Resolution 3.3
 #define ADC_Bit_Resolution 12
 #define RatioMQ135CleanAir 3.6
-#define MQ135_R0 22.5
+#define MQ135_R0 79
 
 #define READ_INTERVAL 5000
 #define DATA_SEND_INTERVAL 60000UL
